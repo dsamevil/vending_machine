@@ -1,147 +1,123 @@
-#include <EEPROM.h>
+#define VRX_PIN  A1
+#define VRY_PIN  A2
 
-#define COIN_ACCEPTOR_PIN 2
-#define MOTOR_PIN_1 7
-#define MOTOR_PIN_2 6
-#define LED_PIN 12 // Define LED pin
-#define BUTTON_PIN 10 // Define button pin
-#define GROUND_PIN 9 // Define ground pin
-#define RELAY_PIN 4 // Define relay pin for the machine
+#define LEFT_THRESHOLD  400
+#define RIGHT_THRESHOLD 800
 
-#define MOTOR_ROTATION_TIME 1060
-#define EEPROM_ADDRESS 0 // Starting EEPROM address for storing data
+#define UP_THRESHOLD    400
+#define DOWN_THRESHOLD  800
+#define TOLERANCE       50 // Adjust tolerance as needed
 
-int impulsCount = 0;
-float total_amount = 0.0;
-int items_remaining = 23; // Change the initial value to 24
-int i = 0;
-bool buttonPressed = false;
+#define COMMAND_NO     0x00
+#define COMMAND_LEFT   0x01
+#define COMMAND_RIGHT  0x02
+#define COMMAND_UP     0x04
+#define COMMAND_DOWN   0x08
+
+#define RPWM1 5
+#define LPWM1 6
+#define REN1  8
+#define LEN1  9
+
+#define RPWM2 10
+#define LPWM2 11
+#define REN2  13
+#define LEN2  122
+
+int xValue = 0;
+int yValue = 0;
+int command = COMMAND_NO;
+int motorSpeedLeftRight = 100; // Maximum speed for left/right movements
+int motorSpeedUpDown = 75;     // Maximum speed for up/down movements
+int rampUpSteps = 20;           // Number of steps for ramping up
+int motorSpeed = 0;
 
 void setup() {
   Serial.begin(9600);
-  pinMode(COIN_ACCEPTOR_PIN, INPUT);
-  pinMode(MOTOR_PIN_1, OUTPUT);
-  pinMode(MOTOR_PIN_2, OUTPUT);
-  pinMode(LED_PIN, OUTPUT); // Set LED pin as output
-  pinMode(BUTTON_PIN, INPUT_PULLUP); // Set button pin as input with internal pull-up resistor
-  pinMode(GROUND_PIN, OUTPUT); // Set ground pin as output
-  pinMode(RELAY_PIN, OUTPUT); // Set relay pin for the machine
+  pinMode(RPWM1, OUTPUT);
+  pinMode(LPWM1, OUTPUT);
+  pinMode(LEN1, OUTPUT);
+  pinMode(REN1, OUTPUT);
+  digitalWrite(REN1, HIGH);
+  digitalWrite(LEN1, HIGH);
 
-  digitalWrite(GROUND_PIN, LOW); // Set ground pin to LOW
-
-  digitalWrite(MOTOR_PIN_1, LOW);
-  digitalWrite(MOTOR_PIN_2, LOW);
-  digitalWrite(RELAY_PIN, LOW); // Turn on vending machine initially
-  digitalWrite(LED_PIN, HIGH); // Turn on LED initially
-
-  attachInterrupt(0, incomingImpuls, FALLING);
-
-  // Restore data from EEPROM if it's valid
-  if (EEPROM.read(EEPROM_ADDRESS) != 255 && EEPROM.read(EEPROM_ADDRESS + sizeof(total_amount)) != 255) {
-    EEPROM.get(EEPROM_ADDRESS, total_amount);
-    EEPROM.get(EEPROM_ADDRESS + sizeof(total_amount), items_remaining);
-  } else {
-    // Initialize EEPROM data if it's not valid
-    total_amount = 0.0;
-    items_remaining = 23; // Change the initial value to 24
-    EEPROM.put(EEPROM_ADDRESS, total_amount);
-    EEPROM.put(EEPROM_ADDRESS + sizeof(total_amount), items_remaining);
-  }
-}
-
-
-void incomingImpuls() {
-  impulsCount = impulsCount + 1;
-  i = 0;
+  pinMode(RPWM2, OUTPUT);
+  pinMode(LPWM2, OUTPUT);
+  pinMode(LEN2, OUTPUT);
+  pinMode(REN2, OUTPUT);
+  digitalWrite(REN2, HIGH);
+  digitalWrite(LEN2, HIGH);
 }
 
 void loop() {
-  Serial.print("i: ");
-  Serial.print(i);
-  // Serial.print("\tTotal Amount: ");
-  // Serial.print(total_amount);
-  Serial.print("\tItems Remaining: ");
-  Serial.print(items_remaining);
-  Serial.print("\tImpuls Count: ");
-  Serial.println(impulsCount);
-  i = i + 1;
+  xValue = analogRead(VRX_PIN);
+  yValue = analogRead(VRY_PIN);
 
-  if (i >= 30) {
-    if (impulsCount == 10 && items_remaining > 0) {
-      total_amount = total_amount + 5;
-      dispense();
-      items_remaining--; // Decrease the count of items remaining
-    }
-    impulsCount = 0; // Reset impulsCount to zero after every 30 iterations
-    i = 0; // Reset i to zero after every 30 iterations
-  }
+  command = COMMAND_NO;
 
-  if (items_remaining == 0 && !buttonPressed) {
-    // Blink the LED if items count is zero and button is not pressed
-    blinkLED();
-    digitalWrite(RELAY_PIN, HIGH); // Turn off vending machine
+  if (xValue < LEFT_THRESHOLD - TOLERANCE)
+    command = command | COMMAND_LEFT;
+  else if (xValue > RIGHT_THRESHOLD + TOLERANCE)
+    command = command | COMMAND_RIGHT;
+
+  if (yValue < UP_THRESHOLD - TOLERANCE)
+    command = command | COMMAND_UP;
+  else if (yValue > DOWN_THRESHOLD + TOLERANCE)
+    command = command | COMMAND_DOWN;
+
+  // Update motor speed based on the joystick position
+  if (command & COMMAND_LEFT || command & COMMAND_RIGHT) {
+    rampUpSpeed(motorSpeedLeftRight);
+  } else if (command & COMMAND_UP || command & COMMAND_DOWN) {
+    rampUpSpeed(motorSpeedUpDown);
   } else {
-    digitalWrite(RELAY_PIN, LOW); // Turn on vending machine
+    motorSpeed = 0; // If no command, stop the motor immediately
   }
 
-  // Check if button is pressed
-  if (digitalRead(BUTTON_PIN) == LOW) {
-    resetMachine();
+  // Apply motor control
+  applyMotorControl();
+
+  delay(50); // Adjust delay as needed
+}
+
+// Function to gradually increase motor speed from 0 to targetSpeed
+void rampUpSpeed(int targetSpeed) {
+  if (motorSpeed < targetSpeed) {
+    motorSpeed += targetSpeed / rampUpSteps;
   }
+}
 
-  // Save data to EEPROM every time the items_remaining changes
-  static int prevItems = items_remaining;
-  if (items_remaining != prevItems) {
-    EEPROM.put(EEPROM_ADDRESS, total_amount);
-    EEPROM.put(EEPROM_ADDRESS + sizeof(total_amount), items_remaining);
-    prevItems = items_remaining;
+// Function to apply motor control based on the current command and motor speed
+void applyMotorControl() {
+  if (command & COMMAND_LEFT) {
+    Serial.println("COMMAND LEFT");
+    analogWrite(LPWM1, 0);
+    analogWrite(RPWM1, motorSpeed);
+    analogWrite(LPWM2, 0);
+    analogWrite(RPWM2, motorSpeed);
+  } else if (command & COMMAND_RIGHT) {
+    Serial.println("COMMAND RIGHT");
+    analogWrite(LPWM1, motorSpeed);
+    analogWrite(RPWM1, 0);
+    analogWrite(LPWM2, motorSpeed);
+    analogWrite(RPWM2, 0);
+  } else if (command & COMMAND_UP) {
+    Serial.println("COMMAND UP");
+    analogWrite(LPWM1, motorSpeed);
+    analogWrite(RPWM1, 0);
+    analogWrite(LPWM2, 0);
+    analogWrite(RPWM2, motorSpeed);
+  } else if (command & COMMAND_DOWN) {
+    Serial.println("COMMAND DOWN");
+    analogWrite(LPWM1, 0);
+    analogWrite(RPWM1, motorSpeed);
+    analogWrite(LPWM2, motorSpeed);
+    analogWrite(RPWM2, 0);
+  } else {
+    Serial.println("STOP MOTORS");
+    analogWrite(LPWM1, 0);
+    analogWrite(RPWM1, 0);
+    analogWrite(LPWM2, 0);
+    analogWrite(RPWM2, 0);
   }
-}
-
-void dispense() {
-  digitalWrite(MOTOR_PIN_1, LOW);
-  digitalWrite(MOTOR_PIN_2, HIGH);
-  delay(MOTOR_ROTATION_TIME);
-  digitalWrite(MOTOR_PIN_1, LOW);
-  digitalWrite(MOTOR_PIN_2, LOW);
-  blinkLED2();
-  digitalWrite(LED_PIN, HIGH);
-}
-
-void blinkLED() {
-  // Blink the LED (500ms ON, 500ms OFF)
-  digitalWrite(LED_PIN, HIGH);
-  delay(400);
-  digitalWrite(LED_PIN, LOW);
-  delay(400);
-}
-
-void blinkLED2() {
-  // Blink the LED (500ms ON, 500ms OFF)
-  digitalWrite(LED_PIN, LOW);
-  delay(50);
-  digitalWrite(LED_PIN, HIGH);
-  delay(50);
-  digitalWrite(LED_PIN, LOW);
-  delay(50);
-  digitalWrite(LED_PIN, HIGH);
-  delay(50);
-  digitalWrite(LED_PIN, LOW);
-  delay(50);
-  digitalWrite(LED_PIN, HIGH);
-  delay(50);
-  digitalWrite(LED_PIN, LOW);
-  delay(50);
-  digitalWrite(LED_PIN, HIGH);
-  delay(50);
-}
-
-void resetMachine() {
-  items_remaining = 23; // Reset items count to 24
-  buttonPressed = true; // Set buttonPressed flag to true
-  digitalWrite(LED_PIN, HIGH); // Turn off LED blinking
-  digitalWrite(GROUND_PIN, HIGH); // Set ground pin to HIGH
-  delay(1000); // Wait for debounce
-  digitalWrite(GROUND_PIN, LOW); // Set ground pin to LOW
-  buttonPressed = false; // Reset buttonPressed flag
 }
